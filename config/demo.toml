@@ -1,0 +1,44 @@
+# Configurație Demo (cont paper). Secretele apar numai ca referințe. Schema: AppConfig (v1).
+schema_version = "1"
+environment = "demo"
+
+[run]
+seed = 42
+db_path = "runs/demo.db"
+label = "demo"
+
+[data]
+source_id = "ibkr_market_data"
+bar_interval_min = 15
+default_freshness_seconds = 1800
+
+[broker]
+kind = "demo"
+name = "ibkr"
+endpoint = "127.0.0.1:7497"
+account_id = "DU0000000"
+secret_ref = "qts/demo/broker_key"
+
+[risk]
+risk_per_trade_target_eur = "0.25"
+risk_per_trade_max_eur = "0.50"
+daily_loss_limit_eur = "2"
+total_loss_limit_eur = "10"
+max_open_positions = 3
+
+[strategy]
+strategy_id = "mean_reversion_v1"
+
+[kill_switch]
+open_orders_policy = "keep"
+
+[[instruments]]
+symbol = "XYZ"
+venue = "XETR"
+asset_class = "etf"
+currency = "EUR"
+tick_size = "0.01"
+qty_step = "0.001"
+min_qty = "0.001"
+calendar_id = "XETR"
+fractional = true

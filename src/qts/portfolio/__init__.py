@@ -1,0 +1,1 @@
+"""Portofoliu și calcul PnL."""

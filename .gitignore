@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+dist/
+build/
+
+# Date și stare locală: nu se versionează
+*.db
+*.db-wal
+*.db-shm
+data/
+runs/
+
+# Secrete: nu se versionează niciodată
+.env
+.env.*
+*.key
+*.pem

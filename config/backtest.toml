@@ -1,0 +1,75 @@
+# Configurație Backtest. Schema: qts.config.schema.AppConfig (versiunea 1).
+schema_version = "1"
+environment = "backtest"
+
+[run]
+seed = 42
+db_path = "runs/backtest.db"
+label = "backtest"
+
+[data]
+source_id = "synthetic"
+dataset_path = "data/synthetic.csv"
+bar_interval_min = 15
+default_freshness_seconds = 1800
+
+[broker]
+kind = "sim"
+
+[risk]
+risk_per_trade_target_eur = "0.25"
+risk_per_trade_max_eur = "0.50"
+daily_loss_limit_eur = "2"
+total_loss_limit_eur = "10"
+max_open_positions = 3
+
+[strategy]
+strategy_id = "mean_reversion_v1"
+
+[kill_switch]
+open_orders_policy = "keep"
+
+[[instruments]]
+symbol = "XYZ"
+venue = "XETR"
+asset_class = "etf"
+currency = "EUR"
+tick_size = "0.01"
+qty_step = "0.001"
+min_qty = "0.001"
+calendar_id = "XETR"
+fractional = true
+
+# Complete_Cost_Model (Req 8.1-8.3), schema: qts.costs.model.CostModelConfig.
+# Valori ilustrative pentru date sintetice; NU sunt verificate față de un broker real
+# (brokerul este o Open_Decision). Orice modificare cere o nouă `version`.
+[costs]
+version = "costs-backtest-v1"
+
+[[costs.commissions.tables]]
+broker = "sim"
+version = "sim-v1"
+valid_from = "2000-01-01T00:00:00Z"
+currency = "EUR"
+percent = "0.0005"
+minimum = "0"
+exchange_fee_fixed = "0.02"
+
+[costs.spreads.XYZ]
+default = "0.0005"
+
+[costs.slippage]
+k = "0.1"
+min_ticks = "0"
+
+[costs.latency]
+latency_ms = 200
+
+[costs.fx]
+conversion_spread = "0.0025"
+
+[costs.taxes]
+approved = true
+rate_on_notional = "0"
+fixed_per_trade = "0"
+reference = "backtest sintetic: fără taxe pe tranzacție; de confirmat de operator înainte de Demo"

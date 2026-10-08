@@ -1,0 +1,4 @@
+# Etapa proiectului. Fișier separat de configurație (design: Live_Gate, bariera 1).
+# În "initial" sunt permise numai Backtest, Shadow și Demo; Live este imposibil (Req 2).
+# Nu modificați manual. Ieșirea din etapa inițială nu face parte din specificația curentă.
+project_stage = "initial"
