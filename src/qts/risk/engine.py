@@ -112,10 +112,13 @@ class RiskEngine:
         config: RiskConfig,
         cost_model: CostModel,
         exposure_approval: ExposureApproval | None = None,
+        *,
+        reporting_currency: str = REPORTING_CURRENCY,
     ) -> None:
         self._config = config
         self._costs = cost_model
         self._approval = exposure_approval
+        self._reporting_currency = reporting_currency
 
     @property
     def config(self) -> RiskConfig:
@@ -258,14 +261,14 @@ class RiskEngine:
                 limit=entry,
                 detail="pentru long este necesar 0 < stop < entry",
             )
-        if snapshot.instrument.currency == REPORTING_CURRENCY:
+        if snapshot.instrument.currency == self._reporting_currency:
             fx = Decimal(1)
         elif snapshot.cost_ctx.fx_rate is not None:
             fx = snapshot.cost_ctx.fx_rate
         else:
             return Violation(
                 reason=RejectReason.FX_RATE_MISSING,
-                detail=f"lipsește cursul {snapshot.instrument.currency}→EUR",
+                detail=f"lipsește cursul {snapshot.instrument.currency}→{self._reporting_currency}",
             )
         return TradeRiskEstimator(
             self._costs,

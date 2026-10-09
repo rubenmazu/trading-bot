@@ -93,7 +93,7 @@ from qts.costs.model import CompleteCostModel, CostContext
 from qts.data.adapter import DataAdapter
 from qts.data.csv_source import CsvSource
 from qts.data.freshness import FreshnessTracker
-from qts.oms.manager import JournalOmsSink, OrderManager
+from qts.oms.manager import JournalOmsSink, OrderManager, reporting_identity
 from qts.persistence.audit import verify_journal
 from qts.persistence.db import open_db
 from qts.persistence.journal import Journal
@@ -277,10 +277,11 @@ def build_core(config: AppConfig, snapshot_id: str) -> CoreComponents:
             f"strategie necunoscută: {config.strategy.strategy_id!r}; "
             f"cunoscute: {sorted(STRATEGIES)}"
         )
-    cost_model = CompleteCostModel(config.costs)
+    reporting = config.reporting_currency
+    cost_model = CompleteCostModel(config.costs, reporting_currency=reporting)
     return CoreComponents(
         strategy=factory(config, snapshot_id),
-        risk=RiskEngine(config.risk, cost_model),
+        risk=RiskEngine(config.risk, cost_model, reporting_currency=reporting),
         cost_model=cost_model,
     )
 
@@ -318,6 +319,7 @@ def _build_sim_broker(
         audit=journal,
         cost_model=core.cost_model,
         sim_config=SimBrokerConfig(broker="sim", initial_cash=config.risk.reference_capital_eur),
+        reporting_currency=config.reporting_currency,
     )
     sim = broker.inner
     if not isinstance(sim, SimBroker):  # pragma: no cover - garantat de build_broker(sim)
@@ -647,6 +649,7 @@ def _run_engine(
             # `ProjectStage` are numai INITIAL în această versiune: implicitul "initial".
             broker_name=broker_name,
             instruments=tuple(config.instruments),
+            reporting_currency=config.reporting_currency,
         ),
         clock=clock,
         broker=adapters.broker,
@@ -1039,7 +1042,12 @@ def _run_demo(
     secret_store: SecretStore | None,
     alpaca_client_factory: AlpacaClientFactory | None,
 ) -> DemoResult:
-    oms = OrderManager(JournalOmsSink(journal))
+    # Execuțiile Demo poartă moneda de raportare a rulării cu curs 1 (instrument și cont în aceeași
+    # monedă, de exemplu SPY/USD cu cont USD): fără conversie, deci numerarul proiectat coincide cu
+    # cel al contului și reconcilierea rămâne strictă (USD==USD).
+    oms = OrderManager(
+        JournalOmsSink(journal), fx_fn=reporting_identity(config.reporting_currency)
+    )
 
     def make_kill_switch(ks_clock: Clock) -> KillSwitch:
         return KillSwitch(
@@ -1060,7 +1068,12 @@ def _run_demo(
         secret_store=secret_store,
         alpaca_client_factory=alpaca_client_factory,
     )
-    reconciler = Reconciler(kill_switch, journal, clock, ReconciliationTolerances())
+    reconciler = Reconciler(
+        kill_switch,
+        journal,
+        clock,
+        ReconciliationTolerances(reporting_currency=config.reporting_currency),
+    )
     alpaca = adapters.broker.inner
     if not isinstance(alpaca, AlpacaBrokerAdapter):  # pragma: no cover - garantat de build_broker
         raise BootstrapError("compunerea Demo necesită brokerul Alpaca paper")

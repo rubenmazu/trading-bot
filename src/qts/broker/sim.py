@@ -174,12 +174,14 @@ class SimBroker:
         cost_model: CompleteCostModel,
         clock: Clock,
         config: SimBrokerConfig | None = None,
+        reporting_currency: str = REPORTING_CURRENCY,
     ) -> None:
         self._account_id = account_id
         self._instruments = {i.symbol: i for i in instruments}
         self._cost_model = cost_model
         self._clock = clock
         self._config = config if config is not None else SimBrokerConfig()
+        self._reporting_currency = reporting_currency
         self._orders: dict[str, _SimOrder] = {}
         self._queue: deque[ExecutionEvent] = deque()
         self._exec_ids: list[str] = []
@@ -405,10 +407,12 @@ class SimBroker:
         return limit if bar.high > limit else None
 
     def _fx_rate(self, inst: Instrument, ctx: SimBarContext) -> Decimal:
-        if inst.currency == REPORTING_CURRENCY:
+        if inst.currency == self._reporting_currency:
             return Decimal(1)
         if ctx.fx_rate is None or ctx.fx_rate <= 0:
-            raise CostModelIncomplete("fx_conversion", f"lipsește cursul {inst.currency}→EUR")
+            raise CostModelIncomplete(
+                "fx_conversion", f"lipsește cursul {inst.currency}→{self._reporting_currency}"
+            )
         return ctx.fx_rate
 
     def _commission_total(
@@ -423,13 +427,14 @@ class SimBroker:
         if schedule is None:
             raise CostModelIncomplete("commission", "niciun tabel de comisioane configurat")
         table = schedule.lookup(self._config.broker, inst.venue, ts)
-        if table.currency == REPORTING_CURRENCY:
+        if table.currency == self._reporting_currency:
             return table.commission(notional_eur)
         if table.currency == inst.currency:
             return table.commission(notional_ccy) * rate
         raise CostModelIncomplete(
             "commission",
-            f"moneda tabelului {table.currency} nu este nici {inst.currency}, nici EUR",
+            f"moneda tabelului {table.currency} nu este nici {inst.currency}, "
+            f"nici {self._reporting_currency}",
         )
 
     def _apply_fill(

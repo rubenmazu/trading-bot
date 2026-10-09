@@ -4,6 +4,10 @@
 # Fail_Safe_Block și de adaptorul Alpaca însuși).
 schema_version = "1"
 environment = "demo"
+# Conturile Alpaca paper sunt în USD. Raportarea rulării este în USD, deci întreaga rulare este
+# coerentă într-o singură monedă (SPY/USD, cont USD, raportare USD): nicio conversie FX silențioasă
+# și reconciliere strictă (USD==USD). Backtest/Shadow rămân pe EUR (implicit).
+reporting_currency = "USD"
 
 [run]
 seed = 42
@@ -37,8 +41,10 @@ strategy_id = "mean_reversion_v1"
 [kill_switch]
 open_orders_policy = "keep"
 
-# SPY: ETF pe S&P 500, listat US, cotat în USD. Alpaca livrează date US; capitalul de referință
-# este în EUR, deci modelul de costuri aplică o conversie FX USD→EUR (vezi [costs.fx]).
+# SPY: ETF pe S&P 500, listat US, cotat în USD. Alpaca livrează date US. Moneda de raportare a
+# rulării este USD (vezi `reporting_currency` de mai sus), deci SPY este deja în moneda de
+# raportare: nicio conversie FX nu se aplică (fx=1). Secțiunea [costs.fx] rămâne pentru
+# completitudine, dar nu este folosită cât timp instrumentul este în moneda de raportare.
 [[instruments]]
 symbol = "SPY"
 venue = "ARCA"
@@ -57,8 +63,9 @@ fractional = true
 [costs]
 version = "costs-demo-v1"
 
-# Alpaca: acțiuni și ETF-uri US fără comision. Moneda tabelului este USD (moneda instrumentului);
-# conversia în EUR se face prin [costs.fx]. Valorile reale sunt confirmate de broker pe execuții.
+# Alpaca: acțiuni și ETF-uri US fără comision. Moneda tabelului este USD = moneda de raportare a
+# rulării, deci comisionul se aplică direct pe nominal, fără conversie. Valorile reale sunt
+# confirmate de broker pe execuții.
 [[costs.commissions.tables]]
 broker = "alpaca"
 version = "alpaca-v1"

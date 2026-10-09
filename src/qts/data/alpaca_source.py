@@ -339,9 +339,7 @@ class AlpacaStreamingSource:
     def _keep_going(self, poll: int) -> bool:
         if self._max_polls is not None and poll >= self._max_polls:
             return False
-        if self._should_continue is not None and not self._should_continue():
-            return False
-        return True
+        return self._should_continue is None or self._should_continue()
 
     def _poll(self, *, start: datetime, end: datetime) -> Iterator[MarketEvent]:
         """Un sondaj: trage barele din [start, end], le deduplică, validează și emite în ordine."""

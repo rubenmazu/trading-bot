@@ -149,6 +149,9 @@ class EngineConfig(Frozen):
     broker_name: str = "sim"  # cheia tabelelor de comisioane în `CostContext`
     instruments: tuple[Instrument, ...]
     time_in_force: TimeInForce = "GTC"
+    # Moneda de raportare a rulării (implicit EUR). Un instrument în această monedă este marcat
+    # fără conversie (`fx=1`); altfel se folosește cursul din `CostContext` (Backtest/Shadow EUR).
+    reporting_currency: str = REPORTING_CURRENCY
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,7 +469,7 @@ class TradingEngine:
         return HistoryView(series, bar.ts_close)
 
     def _mark(self, inst: Instrument, bar: Bar, ctx: CostContext) -> None:
-        fx = Decimal(1) if inst.currency == REPORTING_CURRENCY else ctx.fx_rate
+        fx = Decimal(1) if inst.currency == self._config.reporting_currency else ctx.fx_rate
         if fx is not None:
             self._portfolio.apply_mark(
                 inst.symbol, Mark(price=bar.close, fx_rate_to_eur=fx, ts=bar.ts_close)

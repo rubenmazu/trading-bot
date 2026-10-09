@@ -158,13 +158,16 @@ def build_broker(
     live_gate: LiveGateLike | None = None,
     secret_store: SecretStore | None = None,
     alpaca_client_factory: AlpacaClientFactory | None = None,
+    reporting_currency: str = "EUR",
 ) -> GuardedAdapter:
     """Construiește adaptorul modului ales, învelit în `FailSafeBlock`.
 
     `cost_model` este obligatoriu pentru `sim`. `secret_store` este obligatoriu pentru brokerul
     demo real (Alpaca), care rezolvă cheile API din Secret_Store; `alpaca_client_factory` permite
     injectarea unui client fals în teste (implicit se importă `alpaca-py` la rulare). `live_gate`
-    implicit: `LiveGate` evaluat pe etapa dată, deci închis în Initial_Stage.
+    implicit: `LiveGate` evaluat pe etapa dată, deci închis în Initial_Stage. `reporting_currency`
+    (implicit EUR) este moneda de raportare a rulării, folosită de `SimBroker` pentru deciziile de
+    conversie FX (un instrument în moneda de raportare nu se convertește).
     """
     _refuse_before_construction(config, stage)
     broker = config.broker
@@ -179,6 +182,7 @@ def build_broker(
             cost_model=cost_model,
             clock=clock,
             config=sim_config,
+            reporting_currency=reporting_currency,
         )
     elif broker.kind == "fake":
         endpoint = broker.endpoint or FAKE_DEFAULT_ENDPOINT

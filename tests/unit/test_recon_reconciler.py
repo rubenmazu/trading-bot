@@ -64,12 +64,14 @@ def _reconciler(
     qty_default: str = "0",
     cash_eur: str = "0",
     qty_by_instrument: dict[str, Decimal] | None = None,
+    reporting_currency: str = "EUR",
 ) -> Reconciler:
     tol = ReconciliationTolerances(
         version="recon-v1",
         qty_default=D(qty_default),
         cash_eur=D(cash_eur),
         qty_by_instrument=qty_by_instrument or {},
+        reporting_currency=reporting_currency,
     )
     return Reconciler(ks, journal, clock, tol)
 
@@ -243,6 +245,49 @@ def test_non_eur_cash_currency_activates_global(
     assert not result.ok
     assert result.activated_global
     assert result.differences[0].code is DifferenceCode.CASH_MISMATCH
+
+
+def test_usd_snapshot_reconciles_in_usd_configured_run(
+    ks: KillSwitch, journal: Journal, clock: SimClock
+) -> None:
+    """Un snapshot USD reconciliază curat într-o rulare configurată în USD (Demo coerent).
+
+    Moneda contului (USD) este exact moneda de raportare configurată, deci comparația de numerar
+    continuă strict (USD==USD), fără nicio activare de Kill_Switch pe calea fericită.
+    """
+    r = _reconciler(ks, journal, clock, cash_eur="0", reporting_currency="USD")
+    result = r.reconcile(
+        _snapshot(cash="1000", currency="USD", positions={"SPY": "5"}),
+        _state(cash="1000", positions={"SPY": "5"}),
+        OrderManager(ListSink()),
+        reason=ReconciliationReason.STARTUP,
+    )
+    assert result.ok
+    assert not result.activated_global
+    assert ks.state().global_active is False
+    assert _recon_records(journal) == []
+
+
+def test_eur_run_still_rejects_usd_snapshot_regression(
+    ks: KillSwitch, journal: Journal, clock: SimClock
+) -> None:
+    """Regresie: o rulare EUR (implicit) respinge în continuare un snapshot USD → GLOBAL.
+
+    Dovada că flexibilizarea nu a slăbit reconcilierea: chiar dacă numerarul numeric coincide,
+    moneda contului (USD) diferă de moneda de raportare a rulării (EUR), deci numerarul este o
+    divergență GLOBAL (fail-closed), nu o reconciliere reușită.
+    """
+    r = _reconciler(ks, journal, clock, cash_eur="100", reporting_currency="EUR")
+    result = r.reconcile(
+        _snapshot(cash="1000", currency="USD"),
+        _state(cash="1000"),
+        OrderManager(ListSink()),
+    )
+    assert not result.ok
+    assert result.activated_global
+    assert result.differences[0].code is DifferenceCode.CASH_MISMATCH
+    assert result.differences[0].scope is KillSwitchScope.GLOBAL
+    assert ks.state().global_active is True
 
 
 # --------------------------------------------------------------------------- ordine

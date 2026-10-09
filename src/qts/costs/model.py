@@ -218,10 +218,20 @@ def _mid(quote: Quote) -> Decimal:
 
 
 class CompleteCostModel:
-    """Implementarea `CostModel` folosită de SimBroker în Backtest și Shadow."""
+    """Implementarea `CostModel` folosită de SimBroker în Backtest și Shadow.
 
-    def __init__(self, config: CostModelConfig) -> None:
+    `reporting_currency` (implicit EUR) este moneda rulării: un instrument în această monedă nu
+    are nevoie de conversie FX (`fx=1`, cost de conversie 0), iar un tabel de comisioane în
+    moneda de raportare se aplică pe nominalul deja convertit. Pentru rulări non-EUR (de exemplu
+    un Demo în USD cu instrument USD) toate comparațiile de monedă se fac față de această valoare,
+    deci calea EUR rămâne identică bit cu bit.
+    """
+
+    def __init__(
+        self, config: CostModelConfig, *, reporting_currency: str = REPORTING_CURRENCY
+    ) -> None:
         self._config = config
+        self._reporting_currency = reporting_currency
 
     @property
     def version(self) -> str:
@@ -291,12 +301,13 @@ class CompleteCostModel:
     def _breakdown(**parts: Decimal) -> CostBreakdown:
         return CostBreakdown(**{k: quantize_money(v) for k, v in parts.items()})
 
-    @staticmethod
-    def _fx_rate(inst: Instrument, ctx: CostContext) -> Decimal:
-        if inst.currency == REPORTING_CURRENCY:
+    def _fx_rate(self, inst: Instrument, ctx: CostContext) -> Decimal:
+        if inst.currency == self._reporting_currency:
             return Decimal(1)
         if ctx.fx_rate is None:
-            raise CostModelIncomplete("fx_conversion", f"lipsește cursul {inst.currency}→EUR")
+            raise CostModelIncomplete(
+                "fx_conversion", f"lipsește cursul {inst.currency}→{self._reporting_currency}"
+            )
         return ctx.fx_rate
 
     def _configured_spread(self, inst: Instrument, hour: int) -> Decimal:
@@ -328,11 +339,12 @@ class CompleteCostModel:
         table = self._config.commissions.lookup(broker, inst.venue, ts)
         if table.currency == inst.currency:
             return table.commission(notional_ccy) * rate
-        if table.currency == REPORTING_CURRENCY:
+        if table.currency == self._reporting_currency:
             return table.commission(notional_ccy * rate)
         raise CostModelIncomplete(
             "commission",
-            f"moneda tabelului {table.currency} nu este nici {inst.currency}, nici EUR",
+            f"moneda tabelului {table.currency} nu este nici {inst.currency}, "
+            f"nici {self._reporting_currency}",
         )
 
     def _slippage(
@@ -371,11 +383,13 @@ class CompleteCostModel:
         return ctx.sigma_bar * (latency_s / bar_s).sqrt() * price * order.qty
 
     def _fx_cost(self, inst: Instrument, notional_eur: Decimal) -> Decimal:
-        if inst.currency == REPORTING_CURRENCY:
+        if inst.currency == self._reporting_currency:
             return ZERO
         if self._config.fx is None:
             raise CostModelIncomplete(
-                "fx_conversion", f"spreadul de conversie {inst.currency}→EUR nu este configurat"
+                "fx_conversion",
+                f"spreadul de conversie {inst.currency}→{self._reporting_currency} "
+                "nu este configurat",
             )
         return notional_eur * self._config.fx.conversion_spread
 

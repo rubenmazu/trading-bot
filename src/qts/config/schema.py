@@ -14,9 +14,13 @@ from typing import Final, Literal, get_args
 from pydantic import Field, field_validator, model_validator
 
 from qts.core.models import Dec, Frozen, Instrument
+from qts.core.money import REPORTING_CURRENCY
 from qts.costs.model import CostModelConfig
 
 SCHEMA_VERSION: Final = "1"
+
+# Codul monedei de raportare: trei litere mari (ISO-like), de exemplu „EUR" sau „USD".
+CURRENCY_CODE_PATTERN: Final = re.compile(r"^[A-Z]{3}$")
 
 Environment = Literal["backtest", "shadow", "demo", "live"]
 ENVIRONMENTS: Final[tuple[str, ...]] = get_args(Environment)
@@ -129,6 +133,14 @@ class KillSwitchConfig(Frozen):
 class AppConfig(Frozen):
     schema_version: Literal["1"]
     environment: Environment
+    # Moneda unică de raportare a rulării (Req 29.3). Implicit EUR, deci Backtest/Shadow și toate
+    # testele existente rămân neschimbate. Pentru Demo (cont Alpaca paper în USD) se poate seta
+    # „USD", astfel încât întreaga rulare să fie coerentă într-o singură monedă (instrument USD,
+    # cont USD, raportare USD) fără a slăbi reconcilierea (care rămâne strictă: USD==USD).
+    # Limitele de risc (`RiskConfig`) își păstrează magnitudinile numerice (100 referință, 10
+    # pierdere totală, 0,50/tranzacție, 2/zi), interpretate în moneda de raportare — aceeași
+    # disciplină de risc, doar neetichetată EUR când `reporting_currency != "EUR"`.
+    reporting_currency: str = REPORTING_CURRENCY
     run: RunConfig
     data: DataConfig
     broker: BrokerConfig
@@ -139,6 +151,15 @@ class AppConfig(Frozen):
     # Complete_Cost_Model versionat (Req 8.1-8.3). Opțional în schemă; modurile care folosesc
     # `SimBroker` (Backtest, Shadow) refuză pornirea fără el (`bootstrap.py`).
     costs: CostModelConfig | None = None
+
+    @field_validator("reporting_currency")
+    @classmethod
+    def _valid_currency(cls, value: str) -> str:
+        if not CURRENCY_CODE_PATTERN.fullmatch(value):
+            raise ValueError(
+                "reporting_currency trebuie să fie un cod de trei litere mari (de exemplu EUR, USD)"
+            )
+        return value
 
     @model_validator(mode="after")
     def _mode_consistency(self) -> AppConfig:

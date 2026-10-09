@@ -118,6 +118,7 @@ __all__ = [
     "UnknownOrderError",
     "commission_only",
     "eur_identity",
+    "reporting_identity",
 ]
 
 OMS_VERSION: Final = "1"
@@ -135,6 +136,22 @@ def commission_only(order: Order, event: ExecutionEvent) -> CostBreakdown:
 def eur_identity(order: Order, event: ExecutionEvent) -> tuple[str, Decimal]:
     """Monedă implicită: EUR, curs 1."""
     return REPORTING_CURRENCY, Decimal(1)
+
+
+def reporting_identity(reporting_currency: str = REPORTING_CURRENCY) -> FxFn:
+    """`FxFn` care raportează moneda de raportare a rulării, curs 1 (fără conversie).
+
+    Pentru o rulare în moneda de raportare a instrumentului (de exemplu un Demo în USD cu
+    instrument SPY/USD și cont USD), execuțiile nu necesită conversie: `PortfolioFill` poartă
+    moneda de raportare cu `fx_rate_to_eur = 1`, deci numerarul proiectat coincide cu cel al
+    contului și reconcilierea rămâne strictă. Implicit EUR, deci `reporting_identity()` este
+    echivalent cu `eur_identity`.
+    """
+
+    def fx(order: Order, event: ExecutionEvent) -> tuple[str, Decimal]:
+        return reporting_currency, Decimal(1)
+
+    return fx
 
 
 # --------------------------------------------------------------------------- înregistrări

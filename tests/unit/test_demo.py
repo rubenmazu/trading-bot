@@ -48,7 +48,12 @@ from tests.fixtures.synthetic import SyntheticSpec, write_synthetic_dataset
 from tests.unit.test_bootstrap import CODE, CONFIG_DIR, STAGE_LOCK
 
 D = Decimal
-SPEC = SyntheticSpec(scenario="mean_reverting", seed=11, n_bars=400, volatility=0.004)
+# Instrumentul sintetic este SPY/USD, ca în `config/demo.toml`: reluarea one-shot (`DemoReplay`)
+# păstrează simbolul barei, deci trebuie să coincidă cu instrumentul configurat (altfel motorul
+# ignoră barele ca „instrument necunoscut"). Fluxul continuu reetichetează oricum la SPY.
+SPEC = SyntheticSpec(
+    scenario="mean_reverting", seed=11, n_bars=400, volatility=0.004, instrument="SPY"
+)
 # Preț de execuție constant folosit de clientul paper fals. Portofoliul aplică exact acest preț
 # (prin ExecutionEvent), deci numerarul și pozițiile raportate de client oglindesc proiecția
 # internă și reconcilierea nu detectează divergențe (fără comision → costuri 0).
@@ -103,10 +108,11 @@ class MirrorTradingClient:
     """Client Alpaca paper fals care confirmă și umple complet fiecare ordin, oglindind contul.
 
     Fiecare `submit_order` este acceptat; la următorul `poll_executions` se emite un `fill`
-    complet la `FILL_PRICE`. Contul (`cash`, poziții) este actualizat din aceleași umpleri, în EUR,
-    pornind de la capitalul de referință, astfel încât reconcilierea (poziții + numerar) să
-    coincidă cu proiecția internă (fără comision → costuri 0). `complete=False` forțează calea
-    fail-closed din reconciliere (Req 11.6).
+    complet la `FILL_PRICE`. Contul (`cash`, poziții) este actualizat din aceleași umpleri, în
+    moneda contului (USD, ca un cont Alpaca paper real), pornind de la capitalul de referință,
+    astfel încât reconcilierea (poziții + numerar) să coincidă cu proiecția internă în moneda de
+    raportare USD (fără comision → costuri 0). `complete=False` forțează calea fail-closed din
+    reconciliere (Req 11.6).
     """
 
     def __init__(
@@ -114,7 +120,7 @@ class MirrorTradingClient:
         *,
         endpoint: str = ALPACA_PAPER_ENDPOINT,
         clock: ReplayClock | None = None,
-        currency: str = "EUR",
+        currency: str = "USD",
         account_complete: bool = True,
         initial_cash: Decimal | None = None,
     ) -> None:
@@ -398,7 +404,18 @@ def test_demo_runs_feed_through_alpaca_paper_broker(tmp_path: Path) -> None:
     assert result.net_eur == result.gross_eur - result.costs.total
     assert result.source_id == SPEC.source_id
     assert result.run_id.startswith("dm-")
-    assert not result.kill_switch_active  # cont EUR care oglindește proiecția → fără divergențe
+    assert paper.currency == "USD"  # contul Alpaca paper raportează USD
+    # Rulare coerentă în USD (SPY/USD, cont USD, raportare USD): contul oglindește proiecția, deci
+    # reconcilierea strictă (USD==USD) nu detectează nicio divergență.
+    assert not result.kill_switch_active
+
+
+def test_demo_config_reports_in_usd(tmp_path: Path) -> None:
+    """`config/demo.toml` setează moneda de raportare USD (cont Alpaca paper în USD)."""
+    config_path, _ = _write_demo_config(tmp_path)
+    config = _load_demo_config(config_path)
+    assert config.reporting_currency == "USD"
+    assert config.instruments[0].currency == "USD"
 
 
 def test_demo_startup_reconciliation_before_orders(tmp_path: Path) -> None:

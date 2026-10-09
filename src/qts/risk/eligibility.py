@@ -472,8 +472,14 @@ def evaluate_instrument(
     thresholds: EligibilityThresholds,
     cost_model: CostModel,
     risk: RiskConfig,
+    *,
+    reporting_currency: str = REPORTING_CURRENCY,
 ) -> EligibilityVerdict:
-    """Verdictul de eligibilitate, cu toate motivele de neeligibilitate și valorile calculate."""
+    """Verdictul de eligibilitate, cu toate motivele de neeligibilitate și valorile calculate.
+
+    `reporting_currency` (implicit EUR) este moneda rulării: un instrument în această monedă nu
+    necesită curs FX (`fx=1`), deci calea EUR rămâne neschimbată.
+    """
     out = _Collector()
     computed: dict[str, Decimal] = {}
     with localcontext(_CTX):
@@ -484,14 +490,14 @@ def evaluate_instrument(
             if stats.instrument != instrument.symbol:
                 raise ValueError("statisticile nu aparțin instrumentului evaluat")
             fx: Decimal | None
-            if instrument.currency == REPORTING_CURRENCY:
+            if instrument.currency == reporting_currency:
                 fx = Decimal(1)
             else:
                 fx = stats.cost_ctx.fx_rate
                 if fx is None:
                     out.add(
                         IneligibleCode.FX_RATE_MISSING,
-                        f"lipsește cursul {instrument.currency}→EUR",
+                        f"lipsește cursul {instrument.currency}→{reporting_currency}",
                     )
             _check_market(instrument, stats, thresholds, fx, out, computed)
             if fx is not None:

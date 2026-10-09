@@ -116,17 +116,27 @@ _GLOBAL_CODES: Final = frozenset(
 
 
 class ReconciliationTolerances(Frozen):
-    """Toleranțe versionate pentru reconciliere (11.5). Model imuabil."""
+    """Toleranțe versionate pentru reconciliere (11.5). Model imuabil.
+
+    `reporting_currency` este moneda de raportare a rulării (implicit EUR, deci comportamentul
+    Backtest/Shadow rămâne neschimbat). Reconcilierea compară `snapshot.currency` cu această
+    monedă configurată, nu cu constanta globală: astfel un Demo în USD (cont Alpaca paper în USD)
+    este intern coerent, iar reconcilierea rămâne strictă — orice monedă diferită de cea de
+    raportare activează Kill_Switch GLOBAL (fail-closed).
+    """
 
     version: str = "1"
     qty_default: Dec = ZERO
     qty_by_instrument: dict[str, Dec] = Field(default_factory=dict)
     cash_eur: Dec = ZERO
+    reporting_currency: str = REPORTING_CURRENCY
 
     @model_validator(mode="after")
     def _check(self) -> ReconciliationTolerances:
         if not self.version.strip():
             raise ValueError("version este obligatoriu")
+        if not self.reporting_currency.strip():
+            raise ValueError("reporting_currency este obligatoriu")
         if self.qty_default < 0 or self.cash_eur < 0:
             raise ValueError("toleranțele nu pot fi negative")
         for key, value in self.qty_by_instrument.items():
@@ -289,14 +299,21 @@ class Reconciler:
     def _compare_cash(
         self, snapshot: BrokerSnapshot, portfolio_state: PortfolioState
     ) -> list[ReconciliationDifference]:
-        """Compară numerarul: broker (monedă broker, EUR în această etapă) vs `cash_eur`."""
-        if snapshot.currency != REPORTING_CURRENCY:
+        """Compară numerarul: broker (moneda contului) vs proiecția internă (moneda de raportare).
+
+        Moneda contului brokerului trebuie să fie exact moneda de raportare *configurată* a rulării
+        (`self._tol.reporting_currency`, implicit EUR). Orice altă monedă este o divergență GLOBAL
+        (numerarul stă la baza tuturor limitelor de risc). Rămâne strict: un cont USD reconciliază
+        numai într-o rulare configurată în USD; o rulare în EUR respinge un snapshot USD.
+        """
+        reporting = self._tol.reporting_currency
+        if snapshot.currency != reporting:
             return [
                 ReconciliationDifference(
                     code=DifferenceCode.CASH_MISMATCH,
                     scope=KillSwitchScope.GLOBAL,
                     broker_value=f"{snapshot.cash} {snapshot.currency}",
-                    internal_value=f"{portfolio_state.cash_eur} {REPORTING_CURRENCY}",
+                    internal_value=f"{portfolio_state.cash_eur} {reporting}",
                     detail="moneda numerarului brokerului nu este cea de raportare",
                 )
             ]
@@ -307,7 +324,7 @@ class Reconciler:
                     scope=KillSwitchScope.GLOBAL,
                     broker_value=str(snapshot.cash),
                     internal_value=str(portfolio_state.cash_eur),
-                    detail=f"diferență de numerar peste toleranța {self._tol.cash_eur} EUR",
+                    detail=f"diferență de numerar peste toleranța {self._tol.cash_eur} {reporting}",
                 )
             ]
         return []

@@ -157,8 +157,12 @@ class EvaluationReport(Frozen):
 
     @model_validator(mode="after")
     def _check(self) -> EvaluationReport:
-        if self.reporting_currency != REPORTING_CURRENCY:
-            raise ValueError(f"moneda de raportare trebuie să fie {REPORTING_CURRENCY} (Req 29.3)")
+        # Req 29.3: o monedă unică de raportare per rulare (nu neapărat EUR global). Invariantul
+        # este „o singură monedă coerentă", nu „întotdeauna EUR": implicitul rămâne EUR, deci
+        # rapoartele EUR existente sunt neschimbate, dar o rulare în altă monedă (de exemplu Demo
+        # în USD) raportează coerent în acea monedă.
+        if not self.reporting_currency.strip():
+            raise ValueError("moneda de raportare este obligatorie (Req 29.3)")
         if self.warning != PROFIT_NOT_GUARANTEED_WARNING:
             raise ValueError("avertismentul despre profit nu poate fi modificat (Req 21.7, 29.5)")
         if not self.variants:

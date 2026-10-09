@@ -150,8 +150,9 @@ class PaperQualificationResult(Frozen):
 
     @model_validator(mode="after")
     def _check(self) -> PaperQualificationResult:
-        if self.reporting_currency != REPORTING_CURRENCY:
-            raise ValueError(f"moneda de raportare trebuie să fie {REPORTING_CURRENCY}")
+        # O singură monedă de raportare per rulare (nu neapărat EUR global); implicitul rămâne EUR.
+        if not self.reporting_currency.strip():
+            raise ValueError("moneda de raportare este obligatorie")
         if self.passed and self.reasons:
             raise ValueError("un verdict trecut nu poate avea motive de respingere")
         if not self.passed and not self.reasons:
