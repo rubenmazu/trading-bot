@@ -332,7 +332,9 @@ def test_property_5_reductions_are_exercised() -> None:
     """
     stats: Counter[str] = Counter()
 
-    @settings(database=None)
+    # Buget de exemple fix pentru acoperire: pragul de non-vacuitate (≥ 20 de reduceri) nu trebuie
+    # să depindă de profilul hypothesis activ (`fast`/`ci`/`deep`), care schimbă implicitul.
+    @settings(database=None, max_examples=250, deadline=None)
     @given(scenarios(friendly=True))
     def run(sc: Scenario) -> None:
         decision = _evaluate(sc)

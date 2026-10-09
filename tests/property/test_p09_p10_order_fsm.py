@@ -19,7 +19,7 @@ from collections import Counter
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 
-from hypothesis import event, given
+from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
 from qts.core.models import Order, OrderState
@@ -235,9 +235,17 @@ def test_property_9_10_order_driver_conserves_qty_and_rejects_unchanged(
 
 
 def test_property_9_10_non_vacuity() -> None:
-    """Testul de driver exercită atât execuții acceptate, cât și respingeri de toate felurile."""
+    """Testul de driver exercită atât execuții acceptate, cât și respingeri de toate felurile.
+
+    Non-vacuitatea cere suficiente exemple ca scenariile rare (ex. `cancel_confirmed`) să apară;
+    de aceea rulează cu un `max_examples` fix, independent de profilul hypothesis activ (`fast`/
+    `ci`/`deep`), ca pragul de acoperire să nu depindă de numărul implicit de exemple.
+    """
     STATS.clear()
-    test_property_9_10_order_driver_conserves_qty_and_rejects_unchanged()
+    # Rulează driverul cu un buget de exemple fix (acoperire), nu cel al profilului implicit.
+    settings(max_examples=250, deadline=None)(
+        test_property_9_10_order_driver_conserves_qty_and_rejects_unchanged
+    )()
     for key in (
         "fill_accepted",
         "cancel_confirmed",

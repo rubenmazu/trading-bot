@@ -29,7 +29,16 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Final
 
-from qts.broker.adapter import BrokerAdapter, BrokerCapabilities, BrokerSnapshot
+from qts.broker.adapter import BrokerAdapter, BrokerCapabilities, BrokerSnapshot, OrderRequest
+from qts.broker.alpaca_broker import (
+    ALPACA_PAPER_ENDPOINT,
+    DEFAULT_ALPACA_CAPABILITIES,
+    AlpacaAccount,
+    AlpacaBrokerAdapter,
+    AlpacaExecution,
+    AlpacaOrderAck,
+    AlpacaPosition,
+)
 from qts.broker.fake import DEFAULT_FAKE_CAPABILITIES, FakeBroker
 from qts.broker.sim import DEFAULT_SIM_CAPABILITIES, SimBarContext, SimBroker, SimBrokerConfig
 from qts.core.clock import SimClock
@@ -208,9 +217,91 @@ def _fake_harness(caps: BrokerCapabilities | None) -> Harness:
     return Harness("fake", broker, step, clock)
 
 
+# --------------------------------------------------------------------------- AlpacaBrokerAdapter
+
+
+class _ContractAlpacaClient:
+    """Client Alpaca fals pentru suita contract: acceptă ordine și forțează execuții la cerere.
+
+    `step()` din harness cheamă `fill(coid, qty, price)` pentru fiecare ordin deschis; execuția
+    este programată ca trade update și adusă de adaptor prin `poll_executions`. Pozițiile și
+    numerarul contului urmăresc execuțiile confirmate, ca `snapshot()` să fie coerent cu fluxul.
+    """
+
+    def __init__(self, clock: SimClock) -> None:
+        self._clock = clock
+        self.endpoint = ALPACA_PAPER_ENDPOINT
+        self._pending: list[AlpacaExecution] = []
+        self._positions: dict[str, Decimal] = {}
+        self._cash = ZERO
+        self._accepted = 0
+
+    def submit_order(self, req: OrderRequest) -> AlpacaOrderAck:
+        self._accepted += 1
+        return AlpacaOrderAck(broker_order_id=f"ALP-{self._accepted:08d}", accepted=True)
+
+    def cancel_order(self, broker_order_id: str) -> None:
+        return None
+
+    def get_account(self) -> AlpacaAccount:
+        positions = tuple(
+            AlpacaPosition(symbol=s, qty=str(q)) for s, q in sorted(self._positions.items()) if q
+        )
+        return AlpacaAccount(
+            cash=str(self._cash), currency="EUR", positions=positions, complete=True
+        )
+
+    def poll_executions(self) -> list[AlpacaExecution]:
+        batch = self._pending
+        self._pending = []
+        return batch
+
+    def fill(self, client_order_id: str, side: str, qty: Decimal, price: Decimal) -> None:
+        sign = D(1) if side == "BUY" else D(-1)
+        self._positions[CONTRACT_SYMBOL] = (
+            self._positions.get(CONTRACT_SYMBOL, ZERO) + sign * qty
+        )
+        self._cash -= sign * price * qty
+        self._pending.append(
+            AlpacaExecution(
+                client_order_id=client_order_id,
+                kind="fill",  # adaptorul alege PARTIAL/FILL după cantitatea rămasă
+                ts=self._clock.now(),
+                qty=str(qty),
+                price=str(price),
+            )
+        )
+
+
+def _alpaca_harness(caps: BrokerCapabilities | None) -> Harness:
+    clock = SimClock(T0)
+    client = _ContractAlpacaClient(clock)
+    broker = AlpacaBrokerAdapter(
+        account_id="ALPACA-CONTRACT",
+        instruments=[contract_instrument()],
+        client=client,
+        clock=clock,
+        capabilities=caps if caps is not None else DEFAULT_ALPACA_CAPABILITIES,
+    )
+    def step() -> None:
+        # Programează următoarea tranșă pentru fiecare ordin încă deschis. Al doilea `snapshot()`
+        # determină adaptorul să preia imediat execuțiile programate (ingest + actualizare stare),
+        # ca execuția să fie „reală" în același pas, ca la sim/fake. Evenimentele rezultate rămân
+        # în coada adaptorului pentru un `drain()` ulterior (nu sunt consumate aici).
+        for status in broker.snapshot().orders:
+            if status.state in _OPEN_STATES:
+                qty = min(FILL_CHUNK, status.remaining_qty)
+                client.fill(status.client_order_id, status.side, qty, _PRICE)
+        broker.snapshot()
+        clock.advance_to(clock.now() + STEP)
+
+    return Harness("alpaca", broker, step, clock)
+
+
 ADAPTER_FACTORIES: Final[dict[str, AdapterFactory]] = {
     "sim": _sim_harness,
     "fake": _fake_harness,
+    "alpaca": _alpaca_harness,
 }
 
 

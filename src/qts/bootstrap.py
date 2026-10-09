@@ -3,12 +3,17 @@
 Nucleul (`core/engine.py`) primește porturile prin constructor și nu importă niciun adaptor
 concret (Req 1.1, 16.6). Acest modul le alege numai din mediul configurației:
 
-| Mod      | Date                         | Broker                          | Ceas       |
-|----------|------------------------------|---------------------------------|------------|
-| Backtest | `CsvSource` (reluare istorică)| `SimBroker` în `FailSafeBlock` | `SimClock` |
-| Shadow   | refuzat: „not yet available” (sarcina 14.3)                                 |
-| Demo     | refuzat: „not yet available” (adaptorul depinde de Open_Decision broker)    |
-| Live     | refuzat de `check_startup` în Initial_Stage și de `build_broker` (Req 2.2)  |
+| Mod      | Date                          | Broker                              | Ceas       |
+|----------|-------------------------------|-------------------------------------|------------|
+| Backtest | `CsvSource` (reluare istorică)| `SimBroker` în `FailSafeBlock`      | `SimClock` |
+| Shadow   | feed curent (`DataAdapter`)   | `SimBroker` în `FailSafeBlock`      | `WallClock`|
+| Demo     | feed Alpaca (`DataAdapter`)   | `AlpacaBrokerAdapter` paper învelit | `WallClock`|
+| Live     | refuzat de `check_startup` în Initial_Stage și de `build_broker` (Req 2.2)   |
+
+Demo este analog cu Shadow, dar brokerul este Alpaca paper (API real, bani simulați), NU
+`SimBroker`: nu există alimentare `on_bar` și nici ascultători de piață simulați — brokerul își
+produce singur execuțiile prin `events()`, pe care motorul le drenează. În plus, Demo conduce
+`Reconciler` din bucla de rulare: la pornire (înaintea primului ordin) și periodic (≤ 60 s).
 
 Separarea nucleu / adaptoare (Req 1.5, 16.6): `build_core` construiește Strategy, Risk_Engine
 și modelul de costuri numai din secțiunile `strategy`, `risk`, `costs` și din identificatorul
@@ -61,6 +66,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Final
 
+from qts.broker.alpaca_broker import AlpacaBrokerAdapter, AlpacaClientFactory
 from qts.broker.factory import GuardedAdapter, build_broker
 from qts.broker.sim import SimBarContext, SimBroker, SimBrokerConfig
 from qts.config.loader import load_config
@@ -91,11 +97,17 @@ from qts.oms.manager import JournalOmsSink, OrderManager
 from qts.persistence.audit import verify_journal
 from qts.persistence.db import open_db
 from qts.persistence.journal import Journal
-from qts.portfolio.portfolio import Portfolio, pnl_report
+from qts.portfolio.portfolio import Portfolio, PortfolioState, pnl_report
+from qts.recon.reconciler import (
+    Reconciler,
+    ReconciliationReason,
+    ReconciliationTolerances,
+)
 from qts.risk.engine import RiskEngine
 from qts.risk.monitor import LossMonitor
 from qts.safety.kill_switch import JournalKillSwitchStore, KillSwitch
 from qts.safety.stage import StageInfo, check_startup, read_stage
+from qts.secrets.store import SecretStore
 from qts.strategy.base import Strategy
 from qts.strategy.mean_reversion import STRATEGY_ID as MEAN_REVERSION_ID
 from qts.strategy.mean_reversion import MeanReversionStrategy
@@ -107,6 +119,8 @@ __all__ = [
     "BacktestResult",
     "BootstrapError",
     "CoreComponents",
+    "DemoDataFactory",
+    "DemoResult",
     "ModeAdapters",
     "ModeNotAvailableError",
     "RealDataAdapterUnavailableError",
@@ -115,9 +129,11 @@ __all__ = [
     "TrailingMarketEstimator",
     "build_adapters",
     "build_core",
+    "build_demo_adapters",
     "build_shadow_adapters",
     "capital_config_id",
     "run_backtest",
+    "run_demo",
     "run_shadow",
 ]
 
@@ -126,7 +142,7 @@ COMPONENT: Final = "bootstrap"
 ACTOR: Final = "system:bootstrap"
 SIGMA_WINDOW: Final = 20
 ADV_WINDOW: Final = timedelta(days=1)
-AVAILABLE_MODES: Final = frozenset({"backtest", "shadow"})
+AVAILABLE_MODES: Final = frozenset({"backtest", "shadow", "demo"})
 
 _OPEN_STATES: Final = frozenset(
     {
@@ -271,11 +287,8 @@ def build_core(config: AppConfig, snapshot_id: str) -> CoreComponents:
 
 def _require_mode(config: AppConfig) -> None:
     if config.environment not in AVAILABLE_MODES:
-        reason = {
-            "demo": "adaptorul Demo depinde de Open_Decision pentru broker",
-        }.get(config.environment, "mod nesuportat")
         raise ModeNotAvailableError(
-            f"modul {config.environment} is not yet available ({reason}); "
+            f"modul {config.environment} is not yet available (mod nesuportat); "
             f"disponibile: {sorted(AVAILABLE_MODES)}"
         )
 
@@ -392,6 +405,80 @@ def build_shadow_adapters(
         broker=broker,
         market_listeners=(feed_sim,),
         market_context=market_context,
+        dataset_id=data.source_id,
+    )
+    return adapters, kill_switch
+
+
+# Numele brokerului Demo real, cheie în tabelele de comisioane (`CostContext.broker`).
+DEMO_BROKER_NAME: Final = "alpaca"
+
+
+def _demo_market_context(broker_name: str) -> MarketContextFn:
+    """Context de cost pentru Demo: `σ_bar`/ADV estimate fără look-ahead, broker = Alpaca.
+
+    Prețurile de execuție vin de la Alpaca paper (nu de la `SimBroker`), deci NU există alimentare
+    `on_bar` și niciun ascultător simulat. Dar Risk_Engine folosește același `Complete_Cost_Model`
+    pentru a estima costul ordinelor înaintea trimiterii (fail-closed): fără `σ_bar`/ADV, modelul
+    de slippage ar fi incomplet și fiecare ordin ar fi respins. Reutilizăm
+    `TrailingMarketEstimator` (deterministic, din barele deja vizibile) ca să alimentăm
+    estimările — exact ca în Backtest/Shadow —, dar fără a executa nimic simulat; `broker` rămâne
+    cheia tabelelor de comisioane Alpaca.
+    """
+    estimator = TrailingMarketEstimator()
+
+    def market_context(inst: Instrument, bar: Bar) -> CostContext:
+        sigma, adv = estimator.observe(bar)
+        return CostContext(
+            broker=broker_name, sigma_bar=sigma, adv=adv, bar_interval_min=bar.interval_min
+        )
+
+    return market_context
+
+
+def build_demo_adapters(
+    config: AppConfig,
+    stage: StageInfo,
+    *,
+    core: CoreComponents,
+    data: DataAdapter,
+    clock: Clock,
+    journal: Journal,
+    kill_switch_factory: Callable[[Clock], KillSwitch],
+    secret_store: SecretStore | None,
+    alpaca_client_factory: AlpacaClientFactory | None = None,
+) -> tuple[ModeAdapters, KillSwitch]:
+    """Porturile Demo: feed curent (Alpaca) + broker Alpaca paper (API real) + ceas real.
+
+    Spre deosebire de Shadow, brokerul NU este `SimBroker`, ci `AlpacaBrokerAdapter` (paper),
+    construit prin `build_broker(...)` cu cheile din `Secret_Store`. Nu există alimentare de
+    simulator: `market_listeners=()`, iar `market_context` este neutru (brokerul produce singur
+    execuțiile prin `events()`, pe care motorul le drenează la fiecare pas). Ceasul este real
+    (`WallClock` în producție; un ceas injectat în teste) și nu este avansat de motor.
+    """
+    _require_mode(config)
+    kill_switch = kill_switch_factory(clock)
+    broker = build_broker(
+        config,
+        stage,
+        clock=clock,
+        kill_switch=kill_switch,
+        audit=journal,
+        cost_model=core.cost_model,
+        secret_store=secret_store,
+        alpaca_client_factory=alpaca_client_factory,
+    )
+    inner = broker.inner
+    if not isinstance(inner, AlpacaBrokerAdapter):  # pragma: no cover - garantat de build_broker
+        raise BootstrapError(
+            "compunerea Demo necesită broker.kind=demo cu broker.name=alpaca (Alpaca paper)"
+        )
+    adapters = ModeAdapters(
+        clock=clock,
+        data=data,
+        broker=broker,
+        market_listeners=(),
+        market_context=_demo_market_context(DEMO_BROKER_NAME),
         dataset_id=data.source_id,
     )
     return adapters, kill_switch
@@ -532,21 +619,33 @@ def _run_engine(
     *,
     run_id: str,
     advance_clock: bool,
+    broker_name: str = "sim",
+    before_run: Callable[[Portfolio], None] | None = None,
+    extra_listener_factory: Callable[[Portfolio], MarketListener] | None = None,
 ) -> _EngineRun:
     """Construiește și rulează motorul comun. `advance_clock` separă Backtest de Shadow.
 
     În Backtest ceasul este `SimClock`, avansat de motor (`clock_driver`). În Shadow ceasul este
     `WallClock` (timp real) și nu este avansat de motor (`advance_clock=False`): secvența de pași
     procesați rămâne identică — numai sursa timpului diferă (Req 1.1).
+
+    `broker_name` este cheia tabelelor de comisioane din `CostContext` (implicit "sim" pentru
+    Backtest/Shadow; "alpaca" pentru brokerul Demo real). `before_run` rulează înaintea primului
+    eveniment (reconcilierea de pornire, Req 11.1). `extra_listener_factory` adaugă un ascultător
+    de piață legat de portofoliu (reconcilierea periodică Demo, Req 11.3): motorul îl apelează la
+    fiecare bară, înaintea strategiei, deci reconcilierea precede ordinele noi ale acelei bare.
     """
     clock = adapters.clock
     portfolio = Portfolio.with_cash(config.risk.reference_capital_eur)
+    listeners: tuple[MarketListener, ...] = adapters.market_listeners
+    if extra_listener_factory is not None:
+        listeners = (*listeners, extra_listener_factory(portfolio))
     engine = TradingEngine(
         config=EngineConfig(
             run_id=run_id,
             mode=config.environment,
             # `ProjectStage` are numai INITIAL în această versiune: implicitul "initial".
-            broker_name="sim",
+            broker_name=broker_name,
             instruments=tuple(config.instruments),
         ),
         clock=clock,
@@ -564,9 +663,11 @@ def _run_engine(
         ),
         data=adapters.data,
         market_context=adapters.market_context,
-        market_listeners=adapters.market_listeners,
+        market_listeners=listeners,
         clock_driver=clock if advance_clock and isinstance(clock, SimClock) else None,
     )
+    if before_run is not None:
+        before_run(portfolio)
     processed = engine.run()
 
     report = pnl_report(portfolio.snapshot())
@@ -799,3 +900,256 @@ def _run_shadow(
         journal_verified=run.journal_verified,
         order_states=run.order_states,
     )
+
+
+# --------------------------------------------------------------------------- Demo
+
+
+@dataclass(frozen=True, slots=True)
+class DemoResult:
+    """Rezultatul unei rulări Demo (broker Alpaca paper, API real, bani simulați).
+
+    Oglindește `ShadowResult`, dar execuțiile vin de la Alpaca paper, nu de la `SimBroker`.
+    `net_eur = gross_eur - costs.total`. `source_id` identifică feed-ul (Alpaca).
+    `kill_switch_active` semnalează dacă reconcilierea (de pornire sau periodică) a activat
+    Kill_Switch GLOBAL —
+    de exemplu la un snapshot incomplet (fail-closed, Req 11.6) — caz în care niciun ordin nou nu
+    mai este aprobat.
+    """
+
+    snapshot_id: str
+    run_id: str
+    source_id: str
+    db_path: str
+    events_processed: int
+    orders: int
+    fills: int
+    realized_gross_eur: Decimal
+    unrealized_gross_eur: Decimal
+    costs: CostBreakdown
+    journal_head: tuple[int, str]
+    journal_verified: bool
+    reconciliations: int = 0
+    startup_reconciled: bool = False
+    kill_switch_active: bool = False
+    order_states: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def gross_eur(self) -> Decimal:
+        return self.realized_gross_eur + self.unrealized_gross_eur
+
+    @property
+    def net_eur(self) -> Decimal:
+        return self.gross_eur - self.costs.total
+
+
+# Seam-ul feed-ului Demo: aceeași formă ca `ShadowDataFactory` — `(config, clock, base_dir) ->
+# DataAdapter`. În producție este `alpaca_shadow_factory(store)` (același `AlpacaDataAdapter`);
+# în teste o reluare deterministă peste bare sintetice.
+DemoDataFactory = Callable[[AppConfig, Clock, Path], DataAdapter]
+
+
+def _no_demo_data_adapter(config: AppConfig, clock: Clock, base_dir: Path) -> DataAdapter:
+    raise RealDataAdapterUnavailableError(
+        "demo real data adapter is not yet available; injectați `data_factory` (de exemplu "
+        "`alpaca_shadow_factory(store)`) sau o reluare deterministă peste date existente"
+    )
+
+
+def run_demo(
+    config_path: Path,
+    *,
+    stage_lock: Path = Path("stage.lock"),
+    repo_root: Path | None = None,
+    base_dir: Path | None = None,
+    db_path: str | None = None,
+    code_version: CodeVersion | None = None,
+    clock: Clock | None = None,
+    secret_store: SecretStore | None = None,
+    data_factory: DemoDataFactory = _no_demo_data_adapter,
+    alpaca_client_factory: AlpacaClientFactory | None = None,
+) -> DemoResult:
+    """Pornește și rulează modul Demo; orice refuz apare înaintea procesării (fail-closed).
+
+    Compunere (design: tabelul modurilor): feed curent (Alpaca) + broker Alpaca **paper** (API
+    real, bani simulați) + ceas real. Secvența de pași este identică cu Backtest/Shadow (Req 1.1);
+    diferă brokerul (Alpaca paper prin `build_broker`, NU `SimBroker`) și reconcilierea activă
+    (Req 11): la pornire, înaintea oricărui ordin nou, și periodic (interval ≤ 60 s).
+
+    Seam-uri injectabile pentru determinism în teste: `clock` (implicit `WallClock`, nu este
+    avansat de motor), `data_factory` (feed Alpaca sau reluare deterministă), `secret_store`
+    (cheile brokerului) și `alpaca_client_factory` (client Alpaca fals, fără rețea). `code_version`
+    este numai pentru teste.
+    """
+    base = base_dir if base_dir is not None else Path.cwd()
+    wall = clock if clock is not None else WallClock()
+    config = load_config(config_path)
+    if config.environment != "demo":
+        raise BootstrapError(f"run_demo necesită environment=demo, nu {config.environment!r}")
+    if db_path is not None:
+        config = config.model_copy(
+            update={"run": config.run.model_copy(update={"db_path": db_path})}
+        )
+    stage = read_stage(stage_lock)
+    check_startup(config, stage)  # refuză Live și endpoint-urile/conturile live (fail-closed)
+    _require_mode(config)
+    if config.costs is None:
+        raise BootstrapError("secțiunea [costs] lipsește: Complete_Cost_Model este obligatoriu")
+    data = data_factory(config, wall, base)
+
+    code = code_version if code_version is not None else read_code_version(repo_root or base)
+    snapshot = create_snapshot(
+        config, stage, code, created_at=wall.now(), dataset_ids=[data.source_id]
+    )
+    core = build_core(config, snapshot.snapshot_id)
+
+    resolved_db = Path(config.run.db_path)
+    if not resolved_db.is_absolute():
+        resolved_db = base / resolved_db
+    conn = open_db(resolved_db)
+    try:
+        journal = Journal(conn)
+        _record_snapshot(journal, snapshot)
+        return _run_demo(
+            config,
+            stage,
+            snapshot,
+            core,
+            data,
+            wall,
+            journal,
+            str(resolved_db),
+            secret_store=secret_store,
+            alpaca_client_factory=alpaca_client_factory,
+        )
+    finally:
+        conn.close()
+
+
+def _run_demo(
+    config: AppConfig,
+    stage: StageInfo,
+    snapshot: ConfigurationSnapshot,
+    core: CoreComponents,
+    data: DataAdapter,
+    clock: Clock,
+    journal: Journal,
+    db_path: str,
+    *,
+    secret_store: SecretStore | None,
+    alpaca_client_factory: AlpacaClientFactory | None,
+) -> DemoResult:
+    oms = OrderManager(JournalOmsSink(journal))
+
+    def make_kill_switch(ks_clock: Clock) -> KillSwitch:
+        return KillSwitch(
+            JournalKillSwitchStore(journal),
+            clock=ks_clock,
+            config=config.kill_switch,
+            open_orders=_open_orders(oms),
+        )
+
+    adapters, kill_switch = build_demo_adapters(
+        config,
+        stage,
+        core=core,
+        data=data,
+        clock=clock,
+        journal=journal,
+        kill_switch_factory=make_kill_switch,
+        secret_store=secret_store,
+        alpaca_client_factory=alpaca_client_factory,
+    )
+    reconciler = Reconciler(kill_switch, journal, clock, ReconciliationTolerances())
+    alpaca = adapters.broker.inner
+    if not isinstance(alpaca, AlpacaBrokerAdapter):  # pragma: no cover - garantat de build_broker
+        raise BootstrapError("compunerea Demo necesită brokerul Alpaca paper")
+
+    # Reconcilierea este condusă din bucla de rulare (Reconciler nu pornește fire proprii):
+    # - la pornire, înaintea primului ordin nou (Req 11.1);
+    # - periodic, între blocuri de evenimente, când `should_run` o cere (Req 11.3, interval ≤ 60 s).
+    driver = _DemoReconDriver(reconciler, alpaca, oms, clock, config.environment)
+
+    def before_run(portfolio: Portfolio) -> None:
+        driver.reconcile(ReconciliationReason.STARTUP, portfolio.snapshot())
+        driver.startup = True
+
+    def make_periodic_listener(portfolio: Portfolio) -> MarketListener:
+        # Ascultătorul rulează la fiecare bară, înaintea strategiei (deci înaintea ordinelor noi
+        # ale barei). Verifică hook-ul `should_run` al reconcilierului (interval ≤ 60 s) pe ceasul
+        # injectat; reconcilierea periodică nu pornește fire proprii (Req 11.3).
+        def listener(_event: MarketEvent) -> None:
+            driver.maybe_periodic(portfolio.snapshot())
+
+        return listener
+
+    run_id = f"dm-{snapshot.snapshot_id[:16]}"
+    run = _run_engine(
+        config,
+        snapshot,
+        core,
+        adapters,
+        kill_switch,
+        oms,
+        journal,
+        run_id=run_id,
+        advance_clock=False,
+        broker_name=DEMO_BROKER_NAME,
+        before_run=before_run,
+        extra_listener_factory=make_periodic_listener,
+    )
+    return DemoResult(
+        snapshot_id=snapshot.snapshot_id,
+        run_id=run_id,
+        source_id=adapters.dataset_id,
+        db_path=db_path,
+        events_processed=run.processed,
+        orders=run.orders,
+        fills=run.fills,
+        realized_gross_eur=run.realized_gross_eur,
+        unrealized_gross_eur=run.unrealized_gross_eur,
+        costs=run.costs,
+        journal_head=run.journal_head,
+        journal_verified=run.journal_verified,
+        reconciliations=driver.count,
+        startup_reconciled=driver.startup,
+        kill_switch_active=kill_switch.state(clock.now()).global_active,
+        order_states=run.order_states,
+    )
+
+
+class _DemoReconDriver:
+    """Conduce `Reconciler` din bucla Demo: pornire + periodic, pe ceasul injectat (Req 11.1–11.3).
+
+    `Reconciler` nu pornește fire proprii; acest driver citește `should_run`/`interval_seconds` și
+    îi dă snapshot-ul brokerului împreună cu proiecția internă (portofoliu + OMS). Fail-closed:
+    un snapshot incomplet activează deja Kill_Switch GLOBAL în `Reconciler` (Req 11.6).
+    """
+
+    def __init__(
+        self,
+        reconciler: Reconciler,
+        broker: AlpacaBrokerAdapter,
+        oms: OrderManager,
+        clock: Clock,
+        mode: str,
+    ) -> None:
+        self._reconciler = reconciler
+        self._broker = broker
+        self._oms = oms
+        self._clock = clock
+        self._mode = mode
+        self.count = 0
+        self.startup = False
+        self._last_run: datetime | None = None
+
+    def reconcile(self, reason: ReconciliationReason, portfolio_state: PortfolioState) -> None:
+        result = self._reconciler.reconcile(
+            self._broker.snapshot(), portfolio_state, self._oms, reason=reason
+        )
+        self.count += 1
+        self._last_run = result.ts
+
+    def maybe_periodic(self, portfolio_state: PortfolioState) -> None:
+        if self._reconciler.should_run(self._clock.now(), self._mode, last_run=self._last_run):
+            self.reconcile(ReconciliationReason.PERIODIC, portfolio_state)

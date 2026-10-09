@@ -12,7 +12,6 @@ import pytest
 from qts.bootstrap import (
     BacktestResult,
     BootstrapError,
-    ModeNotAvailableError,
     TrailingMarketEstimator,
     build_core,
     run_backtest,
@@ -136,13 +135,23 @@ def test_missing_cost_model_is_refused(tmp_path: Path) -> None:
         run_backtest(config, stage_lock=STAGE_LOCK, base_dir=tmp_path, code_version=CODE)
 
 
-@pytest.mark.parametrize("env", ["demo"])
-def test_modes_without_composition_are_refused(env: str, tmp_path: Path) -> None:
-    # Shadow are acum o compunere proprie (`run_shadow`, sarcina 14.3); numai Demo rămâne fără
-    # compunere (adaptorul depinde de Open_Decision pentru broker).
-    with pytest.raises(ModeNotAvailableError, match="not yet available"):
+def test_all_initial_stage_modes_have_composition() -> None:
+    """Backtest, Shadow și Demo au acum compunere proprie; `_require_mode` nu mai refuză niciunul.
+
+    Live rămâne în afara `AVAILABLE_MODES` și este refuzat de `check_startup`/`build_broker`.
+    `ModeNotAvailableError` se păstrează pentru orice mod viitor fără compunere.
+    """
+    from qts.bootstrap import AVAILABLE_MODES, ModeNotAvailableError
+
+    assert frozenset({"backtest", "demo", "shadow"}) == AVAILABLE_MODES
+    assert issubclass(ModeNotAvailableError, BootstrapError)
+
+
+def test_run_backtest_refuses_demo_config_without_dataset(tmp_path: Path) -> None:
+    """Demo trece prin `run_demo`, nu `run_backtest`: fără dataset, backtest-ul refuză pornirea."""
+    with pytest.raises(BootstrapError):
         run_backtest(
-            CONFIG_DIR / f"{env}.toml",
+            CONFIG_DIR / "demo.toml",
             stage_lock=STAGE_LOCK,
             base_dir=tmp_path,
             code_version=CODE,

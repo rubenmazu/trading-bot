@@ -8,12 +8,13 @@ __pycache__/
 dist/
 build/
 
-# Date și stare locală: nu se versionează
+# Date și stare locală: nu se versionează.
+# Ancorate la rădăcină (`/`) ca să NU excludă pachetul de cod `src/qts/data/`.
 *.db
 *.db-wal
 *.db-shm
-data/
-runs/
+/data/
+/runs/
 
 # Secrete: nu se versionează niciodată
 .env

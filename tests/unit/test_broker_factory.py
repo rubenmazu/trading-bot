@@ -15,6 +15,12 @@ import pytest
 
 from qts.broker import factory
 from qts.broker.adapter import OrderRequest
+from qts.broker.alpaca_broker import (
+    AlpacaAccount,
+    AlpacaBrokerAdapter,
+    AlpacaExecution,
+    AlpacaOrderAck,
+)
 from qts.broker.factory import (
     FAKE_DEFAULT_ACCOUNT,
     SIM_DEFAULT_ACCOUNT,
@@ -35,6 +41,7 @@ from qts.persistence.journal import Journal
 from qts.risk.context import KillSwitchScope
 from qts.safety.kill_switch import JournalKillSwitchStore, KillSwitch
 from qts.safety.stage import ProjectStage, StageInfo, StartupRefusedError
+from qts.secrets.store import InMemorySecretStore
 from tests.helpers import DEMO_BROKER, config_dict
 
 T0 = datetime(2026, 3, 2, 10, tzinfo=UTC)
@@ -123,9 +130,79 @@ def test_fake_requires_fake_endpoint(env: _Env) -> None:
         _build(env, cfg)
 
 
-def test_real_demo_broker_not_available(env: _Env) -> None:
-    with pytest.raises(BrokerNotAvailableError, match="Open_Decision pending"):
+def test_non_alpaca_demo_broker_not_available(env: _Env) -> None:
+    # Singurul broker demo disponibil este Alpaca paper; ibkr nu este implementat.
+    with pytest.raises(BrokerNotAvailableError, match="nu este implementat"):
         _build(env, _cfg(environment="demo", broker=DEMO_BROKER))
+
+
+ALPACA_DEMO_BROKER: dict[str, Any] = {
+    "kind": "demo",
+    "name": "alpaca",
+    "endpoint": "https://paper-api.alpaca.markets",
+    "account_id": "ALPACA-PAPER-1",
+    "secret_ref": "qts/demo/alpaca_key",
+}
+
+
+def _alpaca_store() -> InMemorySecretStore:
+    return InMemorySecretStore(
+        values={
+            "qts/demo/alpaca_key": "KEYVALUE123",
+            "qts/demo/alpaca_key_secret": "SECRETVAL456",
+        },
+        acl={
+            "qts/demo/alpaca_key": {("demo-runner:demo", "demo")},
+            "qts/demo/alpaca_key_secret": {("demo-runner:demo", "demo")},
+        },
+    )
+
+
+class _StubAlpacaClient:
+    """Client Alpaca minimal, fără rețea, doar pentru testul de fabrică."""
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+
+    def submit_order(self, req: OrderRequest) -> AlpacaOrderAck:
+        return AlpacaOrderAck(broker_order_id="ALP-1", accepted=True)
+
+    def cancel_order(self, broker_order_id: str) -> None:
+        return None
+
+    def get_account(self) -> AlpacaAccount:
+        return AlpacaAccount(cash="100000", currency="USD", positions=(), complete=True)
+
+    def poll_executions(self) -> list[AlpacaExecution]:
+        return []
+
+
+def test_demo_alpaca_builds_wrapped_paper_adapter(env: _Env) -> None:
+    block = build_broker(
+        _cfg(environment="demo", broker=ALPACA_DEMO_BROKER),
+        STAGE,
+        clock=env.clock,
+        kill_switch=env.ks,
+        audit=env.journal,
+        secret_store=_alpaca_store(),
+        alpaca_client_factory=lambda k, s, e: _StubAlpacaClient(e),
+    )
+    assert isinstance(block, FailSafeBlock)
+    assert isinstance(block.inner, AlpacaBrokerAdapter)
+    assert block.environment == "demo"
+    assert block.account_id == "ALPACA-PAPER-1"
+    assert block.submit(_req()).accepted
+
+
+def test_demo_alpaca_requires_secret_store(env: _Env) -> None:
+    with pytest.raises(BrokerFactoryError, match="Secret_Store"):
+        build_broker(
+            _cfg(environment="demo", broker=ALPACA_DEMO_BROKER),
+            STAGE,
+            clock=env.clock,
+            kill_switch=env.ks,
+            audit=env.journal,
+        )
 
 
 def test_sim_requires_cost_model(env: _Env) -> None:

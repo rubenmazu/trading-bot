@@ -20,7 +20,7 @@ exact ca seam-ul folosit de `qts shadow`.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Final
+from typing import TYPE_CHECKING, Annotated, Final
 
 import typer
 
@@ -28,11 +28,20 @@ from qts import ENGINE_VERSION
 from qts.bootstrap import (
     BacktestResult,
     BootstrapError,
+    DemoResult,
     ShadowResult,
     run_backtest,
+    run_demo,
     run_shadow,
 )
-from qts.broker.factory import BrokerFactoryError
+
+if TYPE_CHECKING:
+    from qts.data.alpaca_shadow import ShadowDataFactory
+    from qts.secrets.store import SecretStore
+from qts.broker.factory import (
+    BrokerFactoryError,
+    BrokerNotAvailableError,
+)
 from qts.config.loader import ConfigError
 from qts.config.snapshot import SnapshotError
 from qts.data.manifest import DatasetInvalidError
@@ -132,8 +141,8 @@ def backtest(
         raise typer.Exit(1)
 
 
-def _cost_and_pnl_lines(result: BacktestResult | ShadowResult) -> list[str]:
-    """Liniile de cost și PnL, comune pentru Backtest și Shadow (același model de costuri)."""
+def _cost_and_pnl_lines(result: BacktestResult | ShadowResult | DemoResult) -> list[str]:
+    """Liniile de cost și PnL, comune pentru Backtest, Shadow și Demo (același model de costuri)."""
     lines = [
         f"brut realizat:       {result.realized_gross_eur} EUR",
         f"brut nerealizat:     {result.unrealized_gross_eur} EUR",
@@ -177,16 +186,41 @@ def shadow(
         str | None,
         typer.Option("--db", help="Suprascrie run.db_path (intră în Configuration_Snapshot)."),
     ] = None,
+    source: Annotated[
+        str | None,
+        typer.Option(
+            "--source",
+            help="Sursa de date curentă. Momentan: 'alpaca' (feed real). Fără ea, pornirea "
+            "este refuzată (sursa de date este Open_Decision, Req 30).",
+        ),
+    ] = None,
 ) -> None:
     """Rulează modul Shadow: feed curent cu SimBroker (execuție locală) și ceas real.
 
-    Adaptorul de date real depinde de alegerea sursei (Open_Decision, Req 30); până atunci
-    comanda refuză pornirea, deoarece CLI-ul nu injectează o sursă de date reală.
+    Cu `--source alpaca`, feed-ul este `AlpacaDataAdapter` (bare reale, execuție simulată local).
+    Cheile API vin din Secret_Store (keyring): `qts/shadow/alpaca_key` și
+    `qts/shadow/alpaca_secret`. Fără `--source`, adaptorul de date real rămâne o Open_Decision
+    (Req 30) și pornirea este refuzată.
     """
+    from qts.secrets.store import SecretAccessDeniedError, SecretUnavailableError
+
     try:
-        result = run_shadow(config, stage_lock=stage_lock, db_path=db)
+        data_factory = _resolve_shadow_source(source)
+        if data_factory is None:
+            result = run_shadow(config, stage_lock=stage_lock, db_path=db)
+        else:
+            result = run_shadow(
+                config, stage_lock=stage_lock, db_path=db, data_factory=data_factory
+            )
     except (ConfigError, StartupRefusedError, BrokerFactoryError, BootstrapError) as exc:
         typer.echo(f"pornire refuzată: {exc}", err=True)
+        raise typer.Exit(EXIT_REFUSED) from None
+    except (SecretUnavailableError, SecretAccessDeniedError) as exc:
+        typer.echo(
+            "pornire refuzată: cheile Alpaca nu sunt disponibile în Secret_Store (keyring): "
+            f"{exc}. Adaugă qts/shadow/alpaca_key și qts/shadow/alpaca_secret în keyring.",
+            err=True,
+        )
         raise typer.Exit(EXIT_REFUSED) from None
     except SnapshotError as exc:
         typer.echo(
@@ -201,6 +235,159 @@ def shadow(
         typer.echo(line)
     if not result.journal_verified:
         raise typer.Exit(1)
+
+
+def _resolve_shadow_source(source: str | None) -> ShadowDataFactory | None:
+    """Alege fabrica de date Shadow din `--source`. `None` păstrează refuzul implicit (Req 30).
+
+    Pentru `alpaca`, construiește un `Secret_Store` keyring cu ACL pentru identitatea feed-ului
+    Shadow și întoarce fabrica `AlpacaDataAdapter`. Cheile reale nu apar niciodată aici: sunt
+    citite din keyring doar în interiorul fabricii, la pornire.
+    """
+    if source is None:
+        return None
+    if source.lower() != "alpaca":
+        raise BootstrapError(f"sursă de date necunoscută: {source!r} (acceptat: 'alpaca')")
+    from qts.data.alpaca_shadow import SHADOW_IDENTITY, alpaca_shadow_factory
+    from qts.secrets.store import KeyringSecretStore
+
+    acl = {
+        "qts/shadow/alpaca_key": {(SHADOW_IDENTITY.name, "shadow")},
+        "qts/shadow/alpaca_secret": {(SHADOW_IDENTITY.name, "shadow")},
+    }
+    return alpaca_shadow_factory(KeyringSecretStore(acl))
+
+
+def _demo_summary(result: DemoResult) -> list[str]:
+    lines = [
+        f"snapshot:            {result.snapshot_id}",
+        f"run_id:              {result.run_id}",
+        f"sursă:               {result.source_id}",
+        f"evenimente:          {result.events_processed}",
+        f"reconcilieri:        {result.reconciliations} "
+        f"(pornire: {'da' if result.startup_reconciled else 'nu'})",
+        f"kill switch global:  {'ACTIV' if result.kill_switch_active else 'inactiv'}",
+        f"ordine:              {result.orders} {result.order_states}",
+        f"execuții:            {result.fills}",
+    ]
+    return lines + _cost_and_pnl_lines(result)
+
+
+@app.command()
+def demo(
+    config: Annotated[
+        Path, typer.Option("--config", help="Fișierul de configurație Demo (TOML).")
+    ] = Path("config/demo.toml"),
+    stage_lock: Annotated[
+        Path, typer.Option("--stage-lock", help="Fișierul cu etapa proiectului.")
+    ] = Path("stage.lock"),
+    db: Annotated[
+        str | None,
+        typer.Option("--db", help="Suprascrie run.db_path (intră în Configuration_Snapshot)."),
+    ] = None,
+    max_polls: Annotated[
+        int | None,
+        typer.Option(
+            "--max-polls",
+            help="Numărul de sondaje după lotul de încălzire (implicit: continuu, fără limită). "
+            "Util pentru o verificare rapidă fără a rula la nesfârșit.",
+        ),
+    ] = None,
+    once: Annotated[
+        bool,
+        typer.Option(
+            "--once",
+            help="O singură trecere (lot de încălzire + un sondaj), apoi oprire. "
+            "Echivalent cu --max-polls 1.",
+        ),
+    ] = False,
+) -> None:
+    """Rulează modul Demo: broker Alpaca paper (API real, bani simulați) și ceas real.
+
+    Brokerul este `AlpacaBrokerAdapter` (paper), construit prin `build_broker` cu cheile din
+    Secret_Store (keyring); feed-ul este `AlpacaStreamingSource` continuu: reacționează la fiecare
+    bară nou închisă în timp real, cu același motor și aceeași secvență de pași în toate modurile.
+    Implicit rulează continuu; `--max-polls N` sau `--once` fac o verificare rapidă și se opresc.
+    Reconcilierea rulează la pornire (înaintea primului ordin) și periodic (≤ 60 s): un snapshot
+    incomplet activează Kill_Switch GLOBAL (fail-closed) și niciun ordin nou nu mai este aprobat.
+    Comanda acceptă numai configurații demo; nu expune nicio țintă de producție.
+
+    Cheile API vin din keyring: `qts/demo/alpaca_key`, `qts/demo/alpaca_key_secret` (brokerul) și
+    `qts/demo/alpaca_key`, `qts/demo/alpaca_secret` (feed-ul). Fără ele, pornirea este refuzată.
+    """
+    from qts.secrets.store import SecretAccessDeniedError, SecretUnavailableError
+
+    polls = 1 if once else max_polls
+    try:
+        secret_store, data_factory = _demo_dependencies(max_polls=polls)
+        result = run_demo(
+            config,
+            stage_lock=stage_lock,
+            db_path=db,
+            secret_store=secret_store,
+            data_factory=data_factory,
+        )
+    except (
+        ConfigError,
+        StartupRefusedError,
+        BrokerFactoryError,
+        BrokerNotAvailableError,
+        BootstrapError,
+    ) as exc:
+        typer.echo(f"pornire refuzată: {exc}", err=True)
+        raise typer.Exit(EXIT_REFUSED) from None
+    except (SecretUnavailableError, SecretAccessDeniedError) as exc:
+        typer.echo(
+            "pornire refuzată: cheile Alpaca nu sunt disponibile în Secret_Store (keyring): "
+            f"{exc}. Adaugă qts/demo/alpaca_key, qts/demo/alpaca_key_secret și "
+            "qts/demo/alpaca_secret în keyring.",
+            err=True,
+        )
+        raise typer.Exit(EXIT_REFUSED) from None
+    except SnapshotError as exc:
+        typer.echo(
+            f"Configuration_Snapshot nu poate fi creat; rularea este oprită (Req 17.7): {exc}",
+            err=True,
+        )
+        raise typer.Exit(EXIT_REFUSED) from None
+    except DatasetInvalidError as exc:
+        typer.echo(f"set de date invalid: {exc}", err=True)
+        raise typer.Exit(EXIT_REFUSED) from None
+    for line in _demo_summary(result):
+        typer.echo(line)
+    if not result.journal_verified:
+        raise typer.Exit(1)
+
+
+def _demo_dependencies(*, max_polls: int | None = None) -> tuple[SecretStore, ShadowDataFactory]:
+    """Construiește Secret_Store (keyring) + fabrica de date Alpaca continuă pentru Demo.
+
+    ACL-ul autorizează identitatea feed-ului (`shadow-feed`) pentru cheile feed-ului și
+    identitatea runner-ului Demo (`demo-runner:demo`) pentru cheile brokerului, derivate din
+    `broker.secret_ref` (`qts/demo/alpaca_key` → `qts/demo/alpaca_key` și
+    `qts/demo/alpaca_key_secret`). Cheile reale nu apar niciodată aici: sunt citite din keyring
+    doar în interiorul fabricilor.
+
+    Feed-ul este `AlpacaStreamingSource` (continuu): `max_polls=None` rulează la nesfârșit, iar o
+    valoare finită (din `--max-polls`/`--once`) oprește după acel număr de sondaje — același motor,
+    aceeași secvență de pași, doar fluxul de date curge în timp real.
+    """
+    from qts.data.alpaca_shadow import SHADOW_IDENTITY, alpaca_streaming_factory
+    from qts.secrets.store import KeyringSecretStore
+
+    broker_ref = "qts/demo/alpaca_key"
+    acl = {
+        # Feed Alpaca (același seam ca Shadow): identitatea feed-ului, cheile de date.
+        "qts/demo/alpaca_key": {
+            (SHADOW_IDENTITY.name, "demo"),
+            ("demo-runner:demo", "demo"),
+        },
+        "qts/demo/alpaca_secret": {(SHADOW_IDENTITY.name, "demo")},
+        # Broker Alpaca paper: identitatea runner-ului Demo, cheia + secretul derivat.
+        f"{broker_ref}_secret": {("demo-runner:demo", "demo")},
+    }
+    store = KeyringSecretStore(acl)
+    return store, alpaca_streaming_factory(store, max_polls=max_polls)
 
 
 def _evaluation_summary(report: EvaluationReport) -> list[str]:

@@ -210,19 +210,24 @@ def test_repo_initial_stage_configs_start_end_to_end(env: str) -> None:
     check_startup(load_config(config_path(env, CONFIG_DIR)), read_stage(REPO / "stage.lock"))
 
 
+# demo.toml țintește acum Alpaca paper. Endpoint-urile live Alpaca (api.alpaca.markets) sunt
+# refuzate; Alpaca nu are un tipar de cont live cunoscut, deci cazurile de „cont live" comută pe
+# brokerul ibkr (al cărui tipar de cont `U\d+` este cunoscut), ca să exercite aceeași cale.
+_IBKR_DEMO: dict[str, str] = {
+    'name = "alpaca"': 'name = "ibkr"',
+    '"https://paper-api.alpaca.markets"': '"127.0.0.1:7497"',
+    '"ALPACA-PAPER-1"': '"DU0000000"',
+    'broker = "alpaca"': 'broker = "ibkr"',
+}
+
+
 @pytest.mark.parametrize(
     ("replacements", "reason"),
     [
-        ({'"127.0.0.1:7497"': '"127.0.0.1:7496"'}, "endpoint live"),
-        ({'"127.0.0.1:7497"': '"localhost:4001"'}, "endpoint live"),
-        (
-            {
-                'name = "ibkr"': 'name = "alpaca"',
-                '"127.0.0.1:7497"': '"https://api.alpaca.markets"',
-            },
-            "endpoint live",
-        ),
-        ({'"DU0000000"': '"U0000000"'}, "cont live"),
+        ({'"https://paper-api.alpaca.markets"': '"https://api.alpaca.markets"'}, "endpoint live"),
+        ({'"https://paper-api.alpaca.markets"': '"http://api.alpaca.markets"'}, "endpoint live"),
+        ({**_IBKR_DEMO, '"127.0.0.1:7497"': '"localhost:4001"'}, "endpoint live"),
+        ({**_IBKR_DEMO, '"DU0000000"': '"U0000000"'}, "cont live"),
     ],
 )
 def test_demo_file_with_live_endpoint_or_account_refused(
@@ -235,9 +240,12 @@ def test_demo_file_with_live_endpoint_or_account_refused(
 
 
 def test_demo_file_with_live_endpoint_and_account_reports_both(tmp_path: Path) -> None:
-    cfg = load_config(
-        _write_demo(tmp_path, {'"127.0.0.1:7497"': '"127.0.0.1:7496"', '"DU0000000"': '"U1"'})
-    )
+    replacements = {
+        **_IBKR_DEMO,
+        '"127.0.0.1:7497"': '"127.0.0.1:7496"',
+        '"DU0000000"': '"U1"',
+    }
+    cfg = load_config(_write_demo(tmp_path, replacements))
     with pytest.raises(StartupRefusedError) as exc:
         check_startup(cfg, INITIAL)
     text = "\n".join(exc.value.reasons)

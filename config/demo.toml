@@ -1,4 +1,7 @@
-# Configurație Demo (cont paper). Secretele apar numai ca referințe. Schema: AppConfig (v1).
+# Configurație Demo (cont Alpaca paper, bani simulați, API real). Schema: AppConfig (v1).
+# Secretele apar numai ca referințe (`secret_ref`); cheile reale stau în Secret_Store (keyring).
+# Endpoint-ul este exclusiv cel paper Alpaca: nicio cale către Live (verificat de safety/stage.py,
+# Fail_Safe_Block și de adaptorul Alpaca însuși).
 schema_version = "1"
 environment = "demo"
 
@@ -8,16 +11,18 @@ db_path = "runs/demo.db"
 label = "demo"
 
 [data]
-source_id = "ibkr_market_data"
+source_id = "alpaca_market_data"
 bar_interval_min = 15
-default_freshness_seconds = 1800
+# Piața US e deschisă ~16:30-23:00 ora României; în afara orelor nu apar bare noi. Pragul de
+# prospețime este larg (o zi) ca Demo să nu blocheze instrumentul peste noapte sau în weekend.
+default_freshness_seconds = 86400
 
 [broker]
 kind = "demo"
-name = "ibkr"
-endpoint = "127.0.0.1:7497"
-account_id = "DU0000000"
-secret_ref = "qts/demo/broker_key"
+name = "alpaca"
+endpoint = "https://paper-api.alpaca.markets"
+account_id = "ALPACA-PAPER-1"
+secret_ref = "qts/demo/alpaca_key"
 
 [risk]
 risk_per_trade_target_eur = "0.25"
@@ -32,13 +37,52 @@ strategy_id = "mean_reversion_v1"
 [kill_switch]
 open_orders_policy = "keep"
 
+# SPY: ETF pe S&P 500, listat US, cotat în USD. Alpaca livrează date US; capitalul de referință
+# este în EUR, deci modelul de costuri aplică o conversie FX USD→EUR (vezi [costs.fx]).
 [[instruments]]
-symbol = "XYZ"
-venue = "XETR"
+symbol = "SPY"
+venue = "ARCA"
 asset_class = "etf"
-currency = "EUR"
+currency = "USD"
 tick_size = "0.01"
 qty_step = "0.001"
 min_qty = "0.001"
-calendar_id = "XETR"
+calendar_id = "XNYS"
 fractional = true
+
+# Complete_Cost_Model (Req 8.1-8.3), schema: qts.costs.model.CostModelConfig.
+# Demo folosește brokerul Alpaca paper (nu SimBroker): costurile reale vin de la broker prin
+# comisioanele raportate pe execuții. Modelul rămâne obligatoriu fiindcă Risk_Engine estimează
+# costul de ieșire înaintea fiecărui ordin (fail-closed). Valorile sunt ilustrative.
+[costs]
+version = "costs-demo-v1"
+
+# Alpaca: acțiuni și ETF-uri US fără comision. Moneda tabelului este USD (moneda instrumentului);
+# conversia în EUR se face prin [costs.fx]. Valorile reale sunt confirmate de broker pe execuții.
+[[costs.commissions.tables]]
+broker = "alpaca"
+version = "alpaca-v1"
+valid_from = "2000-01-01T00:00:00Z"
+currency = "USD"
+percent = "0"
+minimum = "0"
+exchange_fee_fixed = "0"
+
+[costs.spreads.SPY]
+default = "0.0001"
+
+[costs.slippage]
+k = "0.1"
+min_ticks = "0"
+
+[costs.latency]
+latency_ms = 200
+
+[costs.fx]
+conversion_spread = "0.0025"
+
+[costs.taxes]
+approved = true
+rate_on_notional = "0"
+fixed_per_trade = "0"
+reference = "demo: cont paper fără taxe pe tranzacție"

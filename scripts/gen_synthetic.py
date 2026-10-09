@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from tests.fixtures.synthetic import SyntheticSpec, generate_bars, write_dataset
+from tests.fixtures.synthetic import SyntheticSpec, generate_bars, write_dataset  # noqa: E402
 
 OUT = ROOT / "data" / "synthetic.csv"
 
