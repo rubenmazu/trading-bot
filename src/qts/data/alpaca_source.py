@@ -30,7 +30,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol, runtime_checkable
+from typing import Final, Protocol, runtime_checkable
 
 from qts.core.models import Bar, MarketEvent
 from qts.core.money import dec, round_to_tick
@@ -407,28 +407,44 @@ def _default_client_factory(api_key: str, api_secret: str) -> AlpacaBarClient:  
     return AlpacaPyClient(api_key, api_secret)
 
 
+# Feed-ul implicit de date: IEX este gratuit și disponibil pe conturile paper/gratuite. SIP
+# (datele consolidate de la toate bursele) necesită un abonament plătit la Alpaca; dacă îl ceri
+# fără abonament, API-ul răspunde „subscription does not permit querying recent SIP data". Pentru
+# Demo/paper folosim IEX. Dacă vreodată ai abonament SIP, setează `feed="sip"`.
+DEFAULT_ALPACA_FEED: Final = "iex"
+
+
 class AlpacaPyClient:  # pragma: no cover - necesită rețea și pachetul extern
     """Client real peste `alpaca-py`. Construit doar la rulare, nu în teste.
 
     Mapează intervalul în minute pe un `TimeFrame` Alpaca și cere barele istorice/recente pentru
     simbol. Importul pachetului este amânat în constructor, ca modulul `qts.data.alpaca_source`
     să poată fi importat (și testat) fără `alpaca-py` instalat.
+
+    `feed` alege sursa de date Alpaca: implicit `iex` (gratuit, pentru conturi paper). `sip`
+    (datele consolidate) cere un abonament plătit; fără el, Alpaca refuză cererea.
     """
 
-    def __init__(self, api_key: str, api_secret: str) -> None:
+    def __init__(self, api_key: str, api_secret: str, *, feed: str = DEFAULT_ALPACA_FEED) -> None:
         from alpaca.data.historical import StockHistoricalDataClient
 
         self._client = StockHistoricalDataClient(api_key, api_secret)
+        self._feed = feed
 
     def get_bars(
         self, symbol: str, interval_min: int, start: datetime, end: datetime
     ) -> Sequence[AlpacaBar]:
+        from alpaca.data.enums import DataFeed
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
         timeframe = TimeFrame(amount=interval_min, unit=TimeFrameUnit.Minute)
         request = StockBarsRequest(
-            symbol_or_symbols=symbol, timeframe=timeframe, start=start, end=end
+            symbol_or_symbols=symbol,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            feed=DataFeed(self._feed),
         )
         response = self._client.get_stock_bars(request)
         rows = response.data.get(symbol, [])
